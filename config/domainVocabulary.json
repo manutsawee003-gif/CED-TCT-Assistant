@@ -1,0 +1,7 @@
+{
+  "aliases": {
+    "ced": ["ced"],
+    "tct": ["tct"]
+  },
+  "notes": "This is only a fallback for abbreviations/spelling variants. Search vocabulary, concepts and entities are generated from Dataset รวม at startup."
+}
