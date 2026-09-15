@@ -8,23 +8,28 @@ function dice(a, b) { const left = new Set(grams(a, 2)); const right = new Set(g
 export class SemanticRetriever {
   constructor(domain, cachedVariants = {}) {
     this.domain = domain; this.docFrequency = new Map();
-    this.searchUnits = domain.records.flatMap((record) => (cachedVariants[record.id] || generateSearchVariants(record)).map((variant, index) => ({ record, variant, variantIndex: index })));
-    for (const unit of this.searchUnits) for (const term of new Set(tokens(`${unit.variant} ${unit.record.category}`))) this.docFrequency.set(term, (this.docFrequency.get(term) || 0) + 1);
-    this.vectors = this.searchUnits.map((unit) => this.vector(`${unit.variant} ${unit.record.category}`));
+    // Keep the canonical Dataset question even if a cached search variant is overly compressed.
+    this.searchUnits = domain.records.flatMap((record) => [...new Set([normalizeText(record.question), ...(cachedVariants[record.id] || generateSearchVariants(record))])].map((variant, index) => ({ record, variant, variantIndex: index })));
+    for (const unit of this.searchUnits) for (const term of new Set(tokens(this.searchableText(unit)))) this.docFrequency.set(term, (this.docFrequency.get(term) || 0) + 1);
+    this.vectors = this.searchUnits.map((unit) => this.vector(`${unit.variant} ${unit.record.question} ${unit.record.category}`));
+    this.answerVectors = this.searchUnits.map((unit) => this.vector(this.searchableText(unit)));
   }
-  text(record) { return `${record.question} ${record.category} ${record.dataset}`; }
+  searchableText(unit) { return `${unit.variant} ${unit.record.question} ${unit.record.category} ${unit.record.dataset} ${unit.record.answer}`; }
   vector(text) { const values = tokens(text); const counts = new Map(); for (const term of values) counts.set(term, (counts.get(term) || 0) + 1); const n = this.searchUnits?.length || this.domain.records.length; return new Map([...counts].map(([term, count]) => [term, (count / Math.max(values.length, 1)) * (Math.log((n + 1) / ((this.docFrequency.get(term) || 0) + 1)) + 1)])); }
   retrieve(parsed, topK = 5) {
-    const queryVector = this.vector(parsed.normalized_query); const queryTokens = new Set(tokens(parsed.normalized_query));
+    const queries = parsed.expanded_queries?.length ? parsed.expanded_queries : [parsed.search_query || parsed.normalized_query];
+    const queryFeatures = queries.map((query, index) => ({ query, vector: this.vector(query), tokens: new Set(tokens(query)), priority: index === 1 ? 1 : index === 0 ? 0.82 : 0.58 }));
     const bestByRecord = new Map();
     this.searchUnits.forEach((unit, index) => {
-      const normalized = normalizeText(`${unit.variant} ${unit.record.category}`);
-      const semanticScore = cosine(queryVector, this.vectors[index]);
-      const lexicalScore = [...queryTokens].filter((token) => token.length > 1 && normalized.includes(token)).length / Math.max(queryTokens.size, 1);
-      const fuzzyScore = dice(parsed.normalized_query, unit.variant);
-      const candidate = { ...unit.record, semanticScore, lexicalScore, fuzzyScore, matchedVariant: unit.variant, variantIndex: unit.variantIndex };
+      const normalized = normalizeText(`${unit.variant} ${unit.record.question} ${unit.record.category}`);
+      const scores = queryFeatures.map(({ query, vector, tokens: queryTokens, priority }) => { const semanticScore = cosine(vector, this.vectors[index]); const answerSemanticScore = cosine(vector, this.answerVectors[index]); const lexicalScore = [...queryTokens].filter((token) => token.length > 1 && normalized.includes(token)).length / Math.max(queryTokens.size, 1); const fuzzyScore = dice(query, unit.variant); return { query, semanticScore, answerSemanticScore, lexicalScore, fuzzyScore, priority, weightedEvidence: (semanticScore + lexicalScore + fuzzyScore + answerSemanticScore * 0.25) * priority }; });
+      // The normalized query is the primary representation; broad expansion terms
+      // may increase recall but cannot overpower it merely because they are generic.
+      const bestQuery = scores.reduce((best, score) => score.weightedEvidence > best.weightedEvidence ? score : best);
+      const expansionSupport = scores.filter((score) => score.semanticScore >= 0.16 || score.lexicalScore >= 0.25).length / scores.length;
+      const candidate = { ...unit.record, ...bestQuery, expansionSupport, matchedVariant: unit.variant, variantIndex: unit.variantIndex };
       const current = bestByRecord.get(unit.record.id);
-      if (!current || semanticScore + lexicalScore + fuzzyScore > current.semanticScore + current.lexicalScore + current.fuzzyScore) bestByRecord.set(unit.record.id, candidate);
+      if (!current || candidate.semanticScore + candidate.lexicalScore + candidate.fuzzyScore + candidate.answerSemanticScore * 0.25 > current.semanticScore + current.lexicalScore + current.fuzzyScore + current.answerSemanticScore * 0.25) bestByRecord.set(unit.record.id, candidate);
     });
     return [...bestByRecord.values()].sort((a, b) => (b.semanticScore + b.lexicalScore + b.fuzzyScore) - (a.semanticScore + a.lexicalScore + a.fuzzyScore)).slice(0, topK);
   }

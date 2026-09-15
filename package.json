@@ -8,19 +8,23 @@
     "server": "node server/index.js",
     "build": "vite build",
     "test": "node --test",
-    "evaluate": "node tests/evaluate.js"
+    "evaluate": "node tests/evaluate.js",
+    "evaluate:pipeline": "node tests/evaluatePipeline.js",
+    "profiles:build": "node scripts/buildSearchProfiles.js",
+    "dense:warm": "node scripts/warmDenseIndex.js"
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "@huggingface/transformers": "^4.2.0",
     "dotenv": "^16.4.7",
-    "xlsx": "^0.18.5",
+    "express": "^4.21.2",
+    "lucide-react": "^0.468.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "lucide-react": "^0.468.0"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^5.4.11",
-    "concurrently": "^9.1.0"
+    "concurrently": "^9.1.0",
+    "vite": "^5.4.11"
   }
 }

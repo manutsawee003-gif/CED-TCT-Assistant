@@ -1,0 +1,9 @@
+// Each expected record is identified by Dataset question text; no expected answer is AI-generated.
+export const retrievalCases = [
+  { type: 'answer', query: 'ค่าเรียนซีอีดีต้องจ่ายเท่าไหร่อะ', expectedQuestion: 'ค่าเทอมหลักสูตร CED ปีการศึกษา 2569 เท่าไร', interpretation: { available: true, intent: 'cost', normalized_query: 'ค่าบำรุงการศึกษาหลักสูตร CED', keywords: ['ค่าเทอม'], semantic_concepts: ['ค่าบำรุงการศึกษา'], search_queries: ['ค่าใช้จ่ายเรียน CED'], entities: { program: ['ced'] }, constraints: { program: 'CED' }, possible_meanings: [], confidence: 0.92, ambiguous: false } },
+  { type: 'answer', query: 'เลขสมัครทีซีทีคือเบอร์อะไร', expectedQuestion: 'รหัสสาขาวิชาสำหรับการสมัครหลักสูตร TCT ปีการศึกษา 2569 คืออะไร', interpretation: { available: true, intent: 'find_value', normalized_query: 'รหัสสมัครหลักสูตร TCT', keywords: ['รหัสสมัคร'], semantic_concepts: ['application code'], search_queries: ['เลขรหัสสมัคร TCT'], entities: { program: ['tct'] }, constraints: { program: 'TCT' }, possible_meanings: [], confidence: 0.9, ambiguous: false } },
+  { type: 'answer', query: 'อิ้งหนึ่งได้กี่เครดิต', expectedQuestion: 'รายวิชา 080103001 ภาษาอังกฤษ 1 มีจำนวนกี่หน่วยกิต', interpretation: { available: true, intent: 'find_value', normalized_query: 'วิชาภาษาอังกฤษ 1 มีกี่หน่วยกิต', keywords: ['หน่วยกิต'], semantic_concepts: ['credits'], search_queries: ['จำนวนหน่วยกิต English 1'], entities: {}, constraints: {}, possible_meanings: [], confidence: 0.86, ambiguous: false } },
+  { type: 'clarify', query: 'ค่าใช้จ่ายเท่าไหร่', interpretation: { available: true, intent: 'cost', normalized_query: 'ค่าใช้จ่าย', keywords: [], semantic_concepts: [], search_queries: [], entities: {}, constraints: {}, possible_meanings: ['ค่าเทอม', 'ค่าสมัคร'], confidence: 0.35, ambiguous: true } },
+  { type: 'reject', query: 'ค่าอาหารโรงอาหาร CED เท่าไหร่' },
+  { type: 'reject', query: 'มีที่จอดจักรยานยนต์ไหม' }
+];

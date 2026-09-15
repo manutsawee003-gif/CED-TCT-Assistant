@@ -4,6 +4,16 @@ import { fileURLToPath } from 'node:url';
 import { loadDataset } from '../server/datasetLoader.js';
 import { HybridSearch, NOT_FOUND } from '../server/chatbotSearch.js';
 
+test('uses an AI-normalized semantic query but still returns only a Dataset answer', () => {
+  const result = chatbot.reply('ค่าเรียนแพงปะของซีอีดี', {}, { available: true, intent: 'cost', normalized_query: 'ค่าเทอมหลักสูตร CED ปีการศึกษา 2569 เท่าไร', keywords: ['ค่าบำรุงการศึกษา'], entities: { program: ['ced'] }, possible_meanings: [], confidence: 0.94, ambiguous: false });
+  assert.equal(result.query.typhoon, 'used');
+  assert.match(result.answer, /25,000 บาทต่อภาคการศึกษา/);
+});
+test('does not guess when the interpreter marks a question ambiguous', () => {
+  const result = chatbot.reply('ค่าใช้จ่ายเท่าไหร่', {}, { available: true, intent: 'cost', normalized_query: 'ค่าใช้จ่าย', keywords: [], entities: {}, possible_meanings: ['ค่าเทอม', 'ค่าสมัคร'], confidence: 0.4, ambiguous: true });
+  assert.equal(result.intent, 'clarify');
+});
+
 const { records } = loadDataset(fileURLToPath(new URL('../data/Dataset_CED-TCT1_การรับสมัคร.xlsx', import.meta.url)));
 const chatbot = new HybridSearch(records);
 

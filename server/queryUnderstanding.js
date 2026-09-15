@@ -14,10 +14,57 @@ const CORE_INTENTS = ['find_value', 'find_list', 'eligibility', 'procedure', 're
 
 export function normalizeText(value = '') {
   return String(value).toLowerCase().normalize('NFC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
     .replace(/ม\.\s*(\d)/g, 'ม$1')
     .replace(/ปว\.\s*([ชส])/g, 'ปว$1')
     .replace(/[“”"'`~!@#$%^&*()_+=[\]{};:,.?\\/|<>]+/g, ' ')
     .replace(/\s+/g, ' ').trim();
+}
+
+function editDistance(left, right) {
+  if (left === right) return 0;
+  if (!left.length) return right.length; if (!right.length) return left.length;
+  let previousPrevious = null; let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      let cost = Math.min(current[column - 1] + 1, previous[column] + 1, previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1));
+      if (row > 1 && column > 1 && left[row - 1] === right[column - 2] && left[row - 2] === right[column - 1]) cost = Math.min(cost, previousPrevious[column - 2] + 1);
+      current[column] = cost;
+    }
+    previousPrevious = previous; previous = current;
+  }
+  return previous[right.length];
+}
+
+function correctionCandidates(normalized, domain) {
+  const observed = normalized.match(/[\p{L}]{3,}/gu) || [];
+  const vocabulary = [...new Set([...domain.vocabulary.keys(), ...domain.programs, ...domain.entityCatalog.course_code])].filter((term) => /^[\p{L}\d]{3,}$/u.test(term));
+  const corrections = [];
+  for (const token of observed) {
+    if (domain.vocabulary.has(token) || token.length > 18) continue;
+    const permittedDistance = token.length <= 4 ? 1 : token.length <= 8 ? 2 : 3;
+    const matches = vocabulary.map((candidate) => {
+      const distance = Math.abs(candidate.length - token.length) > permittedDistance ? permittedDistance + 1 : editDistance(token, candidate);
+      return { candidate, distance, similarity: 1 - distance / Math.max(token.length, candidate.length) };
+    }).filter((match) => match.distance <= permittedDistance && match.similarity >= (token.length <= 3 ? 0.6 : 0.7)).sort((a, b) => b.similarity - a.similarity || a.distance - b.distance).slice(0, 3);
+    if (!matches.length) continue;
+    const [best, second] = matches;
+    const confidence = Number(Math.max(0, Math.min(1, best.similarity - (second ? Math.max(0, second.similarity - best.similarity + 0.08) : 0) + 0.04)).toFixed(3));
+    corrections.push({ token, candidates: matches.map(({ candidate, similarity }) => ({ value: candidate, similarity: Number(similarity.toFixed(3)) })), confidence, applied: confidence >= 0.88 && (!second || best.similarity - second.similarity >= 0.08) });
+  }
+  return corrections.slice(0, 8);
+}
+
+/** Safe, Dataset-aware preprocessing. It preserves the original and never alters numeric identifiers. */
+export function preprocessQuery(value, domain) {
+  const original_query = String(value ?? '');
+  const normalized_query = normalizeText(original_query);
+  const compact_query = normalized_query.replace(/\s+/g, '');
+  const corrections = correctionCandidates(normalized_query, domain);
+  let corrected_query = normalized_query;
+  for (const correction of corrections.filter((item) => item.applied)) corrected_query = corrected_query.replace(new RegExp(`(^|\\s)${correction.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`, 'gu'), `$1${correction.candidates[0].value}`);
+  return { original_query, normalized_query, compact_query, corrected_query, corrections };
 }
 
 export function tokens(value = '') {
@@ -75,14 +122,18 @@ export function buildDomainIndex(records, configPath) {
 
 export function extractEntities(text, domain) {
   const normalized = normalizeText(text);
+  // Treat a parsed value as a strict constraint only when it is present in the
+  // Dataset-derived catalog. Conversational fragments must remain retrieval
+  // text, rather than becoming false contradictions.
+  const knownValues = (pattern, catalog, group = 1) => matches(normalized, pattern, group).filter((value) => catalog.has(value));
   const entities = {
     program: [...domain.programs].filter((program) => new RegExp(`\\b${program.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(normalized)),
     study_year: matches(normalized, STRUCTURED_PATTERNS.study_year),
     semester: matches(normalized, STRUCTURED_PATTERNS.semester),
-    academic_year: matches(normalized, STRUCTURED_PATTERNS.academic_year),
-    course_code: matches(normalized, STRUCTURED_PATTERNS.course_code),
-    admission_round: matches(normalized, STRUCTURED_PATTERNS.admission_round),
-    education_level: matches(normalized, STRUCTURED_PATTERNS.education_level, 0),
+    academic_year: knownValues(STRUCTURED_PATTERNS.academic_year, domain.entityCatalog.academic_year),
+    course_code: knownValues(STRUCTURED_PATTERNS.course_code, domain.entityCatalog.course_code),
+    admission_round: knownValues(STRUCTURED_PATTERNS.admission_round, domain.entityCatalog.admission_round),
+    education_level: knownValues(STRUCTURED_PATTERNS.education_level, domain.entityCatalog.education_level, 0),
     topic: [...domain.topics].filter((topic) => topic.length > 3 && normalized.includes(topic)).slice(0, 8)
   };
   // Alias configuration only resolves an already-known program token; it never supplies facts or answers.
@@ -100,12 +151,29 @@ function detectIntent(text, entities, domain) {
 
 function overlap(left, right) { const r = new Set(right); return left.filter((term) => term.length > 1 && r.has(term)).length / Math.max(new Set(left).size, 1); }
 
-export function parseQuery(message, domain, previousContext = {}) {
-  const normalized_query = normalizeText(message);
+function verifiedAiEntities(aiEntities, domain) {
+  const known = { program: domain.programs, academic_year: domain.entityCatalog.academic_year, course_code: domain.entityCatalog.course_code, admission_round: domain.entityCatalog.admission_round, education_level: domain.entityCatalog.education_level, topic: domain.topics };
+  return Object.fromEntries(Object.keys(known).map((key) => [key, (aiEntities?.[key] || []).map(normalizeText).filter((value) => known[key].has(value))]));
+}
+
+export function parseQuery(message, domain, previousContext = {}, interpretation = null) {
+  const preprocessing = preprocessQuery(message, domain);
+  const aiQuery = interpretation?.available && interpretation.normalized_query ? interpretation.normalized_query : preprocessing.normalized_query;
+  const normalized_query = normalizeText(aiQuery);
   const current = extractEntities(normalized_query, domain);
+  const verified = interpretation?.available ? verifiedAiEntities(interpretation.entities, domain) : {};
+  for (const [key, values] of Object.entries(verified)) if (values.length) current[key] = [...new Set([...current[key], ...values])];
   const entities = Object.fromEntries(Object.keys(current).map((key) => [key, current[key].length ? current[key] : (previousContext[key] || [])]));
-  const intent = detectIntent(normalized_query, entities, domain);
-  return { original_query: message, normalized_query, intent, entities, inherited_context: previousContext, canonical: { intent, entities }, missing_entities: [], ambiguity: false };
+  const fallbackIntent = detectIntent(normalized_query, entities, domain);
+  const intent = interpretation?.available && CORE_INTENTS.includes(interpretation.intent) ? interpretation.intent : fallbackIntent;
+  const keywords = interpretation?.available ? interpretation.keywords.map(normalizeText).filter(Boolean) : [];
+  const semantic_concepts = interpretation?.available ? (interpretation.semantic_concepts || []).map(normalizeText).filter(Boolean) : [];
+  // The anchor is a previous Dataset question, supplied only for a short follow-up turn.
+  // It preserves the topic without treating an old entity as a mandatory constraint.
+  const correctionAlternatives = preprocessing.corrections.filter((item) => item.confidence >= 0.65).flatMap((item) => item.candidates.map((candidate) => preprocessing.normalized_query.replace(new RegExp(item.token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gu'), candidate.value)));
+  const expansionInputs = [message, preprocessing.normalized_query, preprocessing.compact_query, preprocessing.corrected_query, normalized_query, previousContext.__followup_anchor || '', ...correctionAlternatives, ...keywords, ...semantic_concepts, ...(interpretation?.available ? (interpretation.search_queries || []) : [])];
+  const expanded_queries = [...new Set(expansionInputs.map(normalizeText).filter((value) => value.length >= 3))].slice(0, 8);
+  return { ...preprocessing, original_query: message, normalized_query, search_query: normalized_query, expanded_queries, intent, entities, constraints: interpretation?.available ? interpretation.constraints || {} : {}, answer_scope: interpretation?.available && interpretation.answer_scope === 'multi' ? 'multi' : 'single', keywords, semantic_concepts, possible_meanings: interpretation?.possible_meanings || [], interpretation_confidence: interpretation?.confidence ?? null, typhoon: interpretation?.available ? 'used' : interpretation?.reason || 'not_configured', inherited_context: previousContext, canonical: { intent, entities }, missing_entities: [], ambiguity: interpretation?.available && (interpretation.ambiguous || (interpretation.possible_meanings?.length > 1 && interpretation.confidence < 0.75)) };
 }
 
 export function contextFromQuery(parsed) {
