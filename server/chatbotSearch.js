@@ -33,7 +33,11 @@ function sourceFromAnswer(answer) { return answer.split(/\r?\n/).filter((line) =
 function valuesIntersect(left = [], right = []) { return left.some((value) => right.includes(value)); }
 // Categories frequently say "CED/TCT" for both programmes, so use the record
 // question as the authoritative scope for a programme/entity constraint.
-function recordEntities(record, domain) { return extractEntities(record.question, domain); }
+function recordEntities(record, domain) {
+  const extracted = extractEntities(`${record.question} ${record.entities || ''} ${record.topic || ''}`, domain);
+  const generic = (record.entities || '').split(/[,|;]/).map(normalizeText).filter(Boolean);
+  return { ...extracted, generic };
+}
 function formatDatasetAnswers(records) { return records.map((record, index) => `${index + 1}. ${record.question}\n${record.answer}`).join('\n\n'); }
 
 export class HybridSearch {
@@ -47,7 +51,7 @@ export class HybridSearch {
     this.denseEnabled = process.env.DENSE_ENABLED === 'true';
     this.recordEntityIndex = new Map(this.domain.records.map((record) => [record.id, recordEntities(record, this.domain)]));
   }
-  fuseCandidates(semanticResults, bm25Results, candidateLimit, denseResults = []) {
+  fuseCandidates(tfidfResults, bm25Results, candidateLimit, denseResults = [], fuzzyResults = []) {
     const byId = new Map();
     const add = (candidate, engine, rank) => {
       const current = byId.get(candidate.id) || { ...candidate, engineRanks: {}, rrfScore: 0 };
@@ -58,8 +62,9 @@ export class HybridSearch {
       current.rrfScore += 1 / (RRF_K + rank);
       byId.set(candidate.id, current);
     };
-    semanticResults.forEach((candidate, index) => add(candidate, 'semantic', index + 1));
+    tfidfResults.forEach((candidate, index) => add(candidate, 'tfidf', index + 1));
     bm25Results.forEach((candidate, index) => add(candidate, 'bm25', index + 1));
+    fuzzyResults.forEach((candidate, index) => add(candidate, 'fuzzy', index + 1));
     denseResults.forEach((candidate, index) => add(candidate, 'dense', index + 1));
     return [...byId.values()].sort((left, right) => right.rrfScore - left.rrfScore).slice(0, candidateLimit);
   }
@@ -75,14 +80,16 @@ export class HybridSearch {
       const entityScore = specified ? compatible / specified : 0.5;
       const conflictPenalty = specified ? conflicts / specified : 0;
       const intentScore = candidate.inferredIntent === parsed.intent ? 1 : 0;
-      const categoryScore = parsed.entities.topic?.some((topic) => normalizeText(candidate.category).includes(topic)) ? 1 : 0;
+      const topicScore = parsed.entities.topic?.some((topic) => normalizeText(`${candidate.topic || ''} ${candidate.category}`).includes(topic)) ? 1 : 0;
+      const queryTerms = new Set((parsed.search_query || '').split(/\s+/).filter((term) => term.length > 1));
+      const answerabilityScore = Math.min(1, intentScore * 0.7 + [...queryTerms].filter((term) => normalizeText(`${candidate.question} ${(candidate.searchAliases || []).join(' ')}`).includes(term)).length / Math.max(queryTerms.size, 1) * 0.3);
       const structuredScore = entityScore;
-      const rankAgreement = Object.keys(candidate.engineRanks || {}).length / 3;
+      const rankAgreement = Object.keys(candidate.engineRanks || {}).length / 4;
       const denseScore = Number.isFinite(candidate.denseScore) ? Math.max(0, candidate.denseScore + 1) / 2 : 0;
-      const baseScore = Math.max(0, (candidate.semanticScore || 0) * SEMANTIC_WEIGHT + (candidate.answerSemanticScore || 0) * ANSWER_SEMANTIC_WEIGHT + (candidate.lexicalScore || 0) * LEXICAL_WEIGHT + (candidate.fuzzyScore || 0) * FUZZY_WEIGHT + denseScore * 0.16 + structuredScore * ENTITY_WEIGHT + intentScore * INTENT_WEIGHT + categoryScore * CATEGORY_WEIGHT + (candidate.expansionSupport || 0) * EXPANSION_WEIGHT + candidate.rrfScore * 3 * 0.08 + rankAgreement * 0.04 - conflictPenalty * CONFLICT_PENALTY);
+      const baseScore = Math.max(0, (candidate.semanticScore || 0) * SEMANTIC_WEIGHT + (candidate.answerSemanticScore || 0) * ANSWER_SEMANTIC_WEIGHT + (candidate.lexicalScore || 0) * LEXICAL_WEIGHT + (candidate.fuzzyScore || 0) * FUZZY_WEIGHT + denseScore * 0.16 + structuredScore * ENTITY_WEIGHT + intentScore * INTENT_WEIGHT + topicScore * CATEGORY_WEIGHT + answerabilityScore * 0.12 + (candidate.expansionSupport || 0) * EXPANSION_WEIGHT + candidate.rrfScore * 3 * 0.08 + rankAgreement * 0.04 - conflictPenalty * CONFLICT_PENALTY);
       const aiRerankScore = aiScores.get(candidate.id) ?? null;
       const finalScore = aiRerankScore === null ? baseScore : baseScore * (1 - AI_RERANK_BLEND) + aiRerankScore * AI_RERANK_BLEND;
-      return { ...candidate, structuredScore, entityScore, intentScore, categoryScore, conflictPenalty, rankAgreement, baseScore: Number(baseScore.toFixed(4)), aiRerankScore, score: Number(finalScore.toFixed(4)) };
+      return { ...candidate, structuredScore, entityScore, intentScore, topicScore, answerabilityScore, conflictPenalty, rankAgreement, baseScore: Number(baseScore.toFixed(4)), aiRerankScore, score: Number(finalScore.toFixed(4)) };
     }).sort((a, b) => b.score - a.score);
   }
   search(query, context = {}, topK = 8, interpretation = null, aiRerank = null) {
@@ -90,8 +97,9 @@ export class HybridSearch {
     const candidateLimit = Math.max(topK * 4, 30);
     const semanticResults = this.retriever.retrieve(parsed, candidateLimit);
     const bm25Results = this.bm25Retriever.retrieve(parsed, candidateLimit);
-    const candidates = this.fuseCandidates(semanticResults, bm25Results, candidateLimit);
-    return { parsed, results: this.rerank(parsed, candidates, aiRerank).slice(0, topK), retrievalDebug: { semanticResults, bm25Results, rrfResults: candidates } };
+    const fuzzyResults = [...semanticResults].sort((left, right) => right.fuzzyScore - left.fuzzyScore);
+    const candidates = this.fuseCandidates(semanticResults, bm25Results, candidateLimit, [], fuzzyResults);
+    return { parsed, results: this.rerank(parsed, candidates, aiRerank).slice(0, topK), retrievalDebug: { semanticResults, bm25Results, fuzzyResults, rrfResults: candidates } };
   }
   async searchWithDense(query, context = {}, topK = 8, interpretation = null, aiRerank = null) {
     const base = this.search(query, context, topK, interpretation, null);
@@ -107,7 +115,7 @@ export class HybridSearch {
     ]);
     clearTimeout(timeout);
     if (!dense.available) return { ...base, denseStatus: dense };
-    const candidates = this.fuseCandidates(base.retrievalDebug.semanticResults, base.retrievalDebug.bm25Results, Math.max(topK * 4, 30), dense.results);
+    const candidates = this.fuseCandidates(base.retrievalDebug.semanticResults, base.retrievalDebug.bm25Results, Math.max(topK * 4, 30), dense.results, base.retrievalDebug.fuzzyResults);
     return { parsed: base.parsed, results: this.rerank(base.parsed, candidates, aiRerank).slice(0, topK), denseStatus: dense, retrievalDebug: { ...base.retrievalDebug, denseResults: dense.results, rrfResults: candidates } };
   }
   reply(message, context = {}, interpretation = null, aiRerank = null, precomputed = null) {
@@ -131,9 +139,9 @@ export class HybridSearch {
     if (parsed.answer_scope === 'multi') {
       const rerankedIds = aiRerank?.available ? new Set(aiRerank.selected_candidate_ids || []) : null;
       const selectedRecords = results.filter((candidate) => candidate.score >= MIN_SCORE && candidate.score >= best.score - MULTI_RECORD_WINDOW && candidate.conflictPenalty === 0 && (!rerankedIds || rerankedIds.has(candidate.id))).filter((candidate, index, all) => all.findIndex((item) => item.answer === candidate.answer) === index).slice(0, MAX_MULTI_RECORDS);
-      if (selectedRecords.length >= 2) return { answer: formatDatasetAnswers(selectedRecords), matchedQuestion: best.question, selectedRecords: selectedRecords.map(({ id, question, category, dataset, score }) => ({ id, question, category, dataset, score })), category: best.category, dataset: best.dataset, confidence: finalConfidence, source: selectedRecords.map((record) => sourceFromAnswer(record.answer)).filter(Boolean).join('\n'), intent: 'dataset_multi', results, query: parsed, context: contextFromQuery(parsed), confidenceBreakdown: { retrieval: best.score, evidence, scoreGap, structured: best.structuredScore, aiRerank: best.aiRerankScore } };
+      if (selectedRecords.length >= 2) return { answer: formatDatasetAnswers(selectedRecords), matchedQuestion: best.question, selectedRecords: selectedRecords.map(({ id, question, category, dataset, source, sourcePage, score }) => ({ id, question, category, dataset, source, sourcePage, score })), category: best.category, dataset: best.dataset, confidence: finalConfidence, source: selectedRecords.map((record) => record.source || sourceFromAnswer(record.answer)).filter(Boolean).join('\n'), intent: 'dataset_multi', results, query: parsed, context: contextFromQuery(parsed), confidenceBreakdown: { retrieval: best.score, evidence, scoreGap, structured: best.structuredScore, aiRerank: best.aiRerankScore } };
     }
-    return { answer: best.answer, matchedQuestion: best.question, category: best.category, dataset: best.dataset, confidence: finalConfidence, source: sourceFromAnswer(best.answer), intent: 'dataset', results, query: parsed, context: contextFromQuery(parsed), confidenceBreakdown: { retrieval: best.score, evidence, scoreGap, structured: best.structuredScore, aiRerank: best.aiRerankScore } };
+    return { answer: best.answer, matchedQuestion: best.question, category: best.category, dataset: best.dataset, source: best.source || sourceFromAnswer(best.answer), sourcePage: best.sourcePage || '', confidence: finalConfidence, intent: 'dataset', results, query: parsed, context: contextFromQuery(parsed), confidenceBreakdown: { retrieval: best.score, evidence, scoreGap, structured: best.structuredScore, aiRerank: best.aiRerankScore } };
   }
 }
 

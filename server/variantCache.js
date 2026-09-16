@@ -4,7 +4,7 @@ import path from 'node:path';
 import { generateSearchVariants } from './variantGenerator.js';
 
 function signature(records) {
-  return crypto.createHash('sha256').update(records.map((record) => `${record.id}|${record.question}|${record.category}`).join('\n')).digest('hex');
+  return crypto.createHash('sha256').update(records.map((record) => `${record.id}|${record.dataset}|${record.category}|${record.topic || ''}|${record.intent || ''}|${record.entities || ''}|${record.question}|${(record.searchAliases || []).join('|')}|${record.searchText || ''}`).join('\n')).digest('hex');
 }
 
 /** Search-only cache. It never writes to, or mutates, the supplied Excel workbook. */

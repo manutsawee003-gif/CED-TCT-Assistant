@@ -23,7 +23,8 @@ export function generateSearchVariants(record) {
   const marker = words.filter((word) => QUESTION_MARKERS.has(word)).at(-1);
   const content = words.filter((word) => !QUESTION_MARKERS.has(word));
   const categoryWords = meaningfulWords(record.category).slice(0, 5);
-  const candidates = new Set([canonical]);
+  // Aliases are first-class search units but remain attached to this one ID.
+  const candidates = new Set([canonical, ...(record.searchAliases || []).map(normalizeText)]);
   // Entity-preserving compression makes long official questions retrievable from chat-like short questions.
   candidates.add([...content, marker].filter(Boolean).join(' '));
   // Moving the requested value/question marker to the front supports inverted chat word order.

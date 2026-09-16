@@ -5,7 +5,7 @@ import { answerChat, getChatRuntime } from './chatRuntime.js';
 const runtime = getChatRuntime();
 const app = express(); app.use(express.json({ limit: '20kb' }));
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, records: runtime.records.length, sheet: runtime.sheetName, variantCache: runtime.search.variantCacheStatus }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, records: runtime.records.length, sheet: runtime.sheetName, columns: runtime.columns, datasetHash: runtime.datasetHash, variantCache: runtime.search.variantCacheStatus }));
 app.post('/api/chat', async (req, res) => {
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   const sessionId = typeof req.body?.sessionId === 'string' && req.body.sessionId.length <= 100 ? req.body.sessionId : 'default';

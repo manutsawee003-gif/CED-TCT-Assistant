@@ -86,6 +86,7 @@ function titleTerms(value) {
 }
 
 function inferRecordIntent(record) {
+  if (record.intent) return normalizeText(record.intent);
   const text = normalizeText(`${record.question} ${record.category}`);
   if (/ค่า|บาท|ค่าธรรมเนียม|บำรุง/.test(text)) return 'cost';
   if (/สมัครได้|คุณสมบัติ|ผู้จบ|รับ.*ไหม/.test(text)) return 'eligibility';
@@ -101,23 +102,27 @@ function inferRecordIntent(record) {
 export function buildDomainIndex(records, configPath) {
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   const vocabulary = new Map(); const programs = new Set(); const topics = new Set();
-  const entityCatalog = { academic_year: new Set(), course_code: new Set(), admission_round: new Set(), education_level: new Set() };
+  const entityCatalog = { academic_year: new Set(), course_code: new Set(), admission_round: new Set(), education_level: new Set(), generic: new Set() };
   const indexedRecords = records.map((record) => {
-    const corpus = `${record.dataset} ${record.category} ${record.question} ${record.answer}`;
+    // Search metadata is used only for retrieval. Answer remains source-of-truth
+    // at response time and is deliberately excluded from inference/index catalogues.
+    const corpus = `${record.dataset} ${record.category} ${record.topic || ''} ${record.intent || ''} ${record.entities || ''} ${record.question} ${(record.searchAliases || []).join(' ')} ${record.searchText || ''}`;
     for (const term of titleTerms(corpus)) vocabulary.set(term, (vocabulary.get(term) || 0) + 1);
     for (const code of matches(corpus, STRUCTURED_PATTERNS.course_code)) entityCatalog.course_code.add(code);
     for (const year of matches(corpus, STRUCTURED_PATTERNS.academic_year)) entityCatalog.academic_year.add(year);
     for (const level of matches(corpus, STRUCTURED_PATTERNS.education_level, 0)) entityCatalog.education_level.add(level);
     for (const round of matches(corpus, STRUCTURED_PATTERNS.admission_round)) entityCatalog.admission_round.add(round);
+    for (const entity of String(record.entities || '').split(/[,|;]/).map(normalizeText).filter((item) => item.length >= 3)) entityCatalog.generic.add(entity);
     // Program labels are discovered from recurring uppercase tokens, not a fixed list.
     for (const label of corpus.match(/\b[A-Z][A-Z0-9-]{1,12}\b/g) || []) programs.add(label.toLowerCase());
-    titleTerms(record.category).forEach((term) => topics.add(term));
+    titleTerms(`${record.category} ${record.topic || ''}`).forEach((term) => topics.add(term));
     return { ...record, inferredIntent: inferRecordIntent(record) };
   });
-  const intentDocuments = new Map(CORE_INTENTS.map((intent) => [intent, []]));
-  for (const record of indexedRecords) intentDocuments.get(record.inferredIntent).push(record.question, record.category);
+  const allIntents = [...new Set([...CORE_INTENTS, ...indexedRecords.map((record) => record.inferredIntent).filter(Boolean)])];
+  const intentDocuments = new Map(allIntents.map((intent) => [intent, []]));
+  for (const record of indexedRecords) intentDocuments.get(record.inferredIntent).push(record.question, record.category, record.topic || '', record.entities || '', ...(record.searchAliases || []));
   const intentTokenSets = new Map([...intentDocuments].map(([intent, documents]) => [intent, new Set(tokens(documents.join(' ')))]));
-  return { records: indexedRecords, vocabulary, programs, topics, entityCatalog, aliases: config.aliases || {}, intents: CORE_INTENTS, intentDocuments, intentTokenSets };
+  return { records: indexedRecords, vocabulary, programs, topics, entityCatalog, aliases: config.aliases || {}, intents: allIntents, intentDocuments, intentTokenSets };
 }
 
 export function extractEntities(text, domain) {
@@ -134,6 +139,7 @@ export function extractEntities(text, domain) {
     course_code: knownValues(STRUCTURED_PATTERNS.course_code, domain.entityCatalog.course_code),
     admission_round: knownValues(STRUCTURED_PATTERNS.admission_round, domain.entityCatalog.admission_round),
     education_level: knownValues(STRUCTURED_PATTERNS.education_level, domain.entityCatalog.education_level, 0),
+    generic: [...domain.entityCatalog.generic].filter((entity) => normalized.includes(entity)).slice(0, 8),
     topic: [...domain.topics].filter((topic) => topic.length > 3 && normalized.includes(topic)).slice(0, 8)
   };
   // Alias configuration only resolves an already-known program token; it never supplies facts or answers.
@@ -152,7 +158,7 @@ function detectIntent(text, entities, domain) {
 function overlap(left, right) { const r = new Set(right); return left.filter((term) => term.length > 1 && r.has(term)).length / Math.max(new Set(left).size, 1); }
 
 function verifiedAiEntities(aiEntities, domain) {
-  const known = { program: domain.programs, academic_year: domain.entityCatalog.academic_year, course_code: domain.entityCatalog.course_code, admission_round: domain.entityCatalog.admission_round, education_level: domain.entityCatalog.education_level, topic: domain.topics };
+  const known = { program: domain.programs, academic_year: domain.entityCatalog.academic_year, course_code: domain.entityCatalog.course_code, admission_round: domain.entityCatalog.admission_round, education_level: domain.entityCatalog.education_level, generic: domain.entityCatalog.generic, topic: domain.topics };
   return Object.fromEntries(Object.keys(known).map((key) => [key, (aiEntities?.[key] || []).map(normalizeText).filter((value) => known[key].has(value))]));
 }
 
@@ -165,7 +171,8 @@ export function parseQuery(message, domain, previousContext = {}, interpretation
   for (const [key, values] of Object.entries(verified)) if (values.length) current[key] = [...new Set([...current[key], ...values])];
   const entities = Object.fromEntries(Object.keys(current).map((key) => [key, current[key].length ? current[key] : (previousContext[key] || [])]));
   const fallbackIntent = detectIntent(normalized_query, entities, domain);
-  const intent = interpretation?.available && CORE_INTENTS.includes(interpretation.intent) ? interpretation.intent : fallbackIntent;
+  const interpretedIntent = normalizeText(interpretation?.intent || '');
+  const intent = interpretation?.available && domain.intents.includes(interpretedIntent) ? interpretedIntent : fallbackIntent;
   const keywords = interpretation?.available ? interpretation.keywords.map(normalizeText).filter(Boolean) : [];
   const semantic_concepts = interpretation?.available ? (interpretation.semantic_concepts || []).map(normalizeText).filter(Boolean) : [];
   // The anchor is a previous Dataset question, supplied only for a short follow-up turn.

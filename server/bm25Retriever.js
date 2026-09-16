@@ -10,10 +10,10 @@ export class Bm25Retriever {
     this.k1 = Number(process.env.BM25_K1 || 1.2);
     this.b = Number(process.env.BM25_B || 0.75);
     this.documents = domain.records.map((record) => {
-      const aliases = cachedVariants[record.id] || [];
-      // Repeating the question once provides field weighting without adding a
-      // separate, hard-coded topic taxonomy.
-      const text = `${record.dataset} ${record.category} ${record.question} ${record.question} ${record.answer} ${aliases.join(' ')}`;
+      const variants = cachedVariants[record.id] || [];
+      // Search_Text is primary when present. Question is repeated for a modest
+      // field weight; aliases/topic/intent/entities provide recall, never facts.
+      const text = `${record.searchText || ''} ${record.question} ${record.question} ${(record.searchAliases || []).join(' ')} ${record.topic || ''} ${record.intent || ''} ${record.entities || ''} ${record.category} ${record.dataset} ${variants.join(' ')}`;
       const terms = tokens(text);
       const frequencies = new Map();
       for (const term of terms) frequencies.set(term, (frequencies.get(term) || 0) + 1);

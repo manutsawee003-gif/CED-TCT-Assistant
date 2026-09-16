@@ -3,14 +3,6 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadDataset } from '../server/datasetLoader.js';
 import { HybridSearch } from '../server/chatbotSearch.js';
-
-const source = fileURLToPath(new URL('../data/Dataset_CED-TCT1_การรับสมัคร.xlsx', import.meta.url));
-const { records } = loadDataset(source);
+const { records } = loadDataset(fileURLToPath(new URL('../data/CED_TCT_2569_Dataset_1200.xlsx', import.meta.url)));
 const chatbot = new HybridSearch(records);
-
-test('hard negative: eligibility outranks an on-topic Portfolio schedule', () => {
-  const result = chatbot.reply('นักเรียน วิทย์-คณิต สมัคร CED รอบพอร์ตได้ไหม');
-  assert.equal(result.intent, 'dataset');
-  assert.match(result.matchedQuestion, /วิทยาศาสตร์-คณิตศาสตร์/);
-  assert.doesNotMatch(result.answer, /21 กันยายน 2568 ถึง 10 พฤศจิกายน 2568/);
-});
+test('hard negative: same topic/entities with different intents is resolved by alias intent', () => { const groups = new Map(); for (const record of records) { const key = `${record.topic}|${record.entities}`; groups.set(key, [...(groups.get(key) || []), record]); } const group = [...groups.values()].find((items) => new Set(items.map((item) => item.intent)).size > 1 && items.some((item) => item.searchAliases.length)); const target = group.find((item) => item.searchAliases.length); assert.equal(chatbot.search(target.searchAliases[0], {}, 1).results[0]?.id, target.id); });

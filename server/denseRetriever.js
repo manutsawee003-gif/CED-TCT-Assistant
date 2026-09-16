@@ -8,11 +8,11 @@ const MODEL = process.env.DENSE_MODEL || 'Xenova/multilingual-e5-small';
 const BATCH_SIZE = Math.max(1, Number(process.env.DENSE_BATCH_SIZE || 16));
 
 function signature(records, variants) {
-  return crypto.createHash('sha256').update(records.map((record) => `${record.id}|${record.question}|${record.answer}|${(variants[record.id] || []).join('|')}`).join('\n')).digest('hex');
+  return crypto.createHash('sha256').update(records.map((record) => `${record.id}|${record.searchText || ''}|${record.question}|${record.topic || ''}|${record.intent || ''}|${record.entities || ''}|${(variants[record.id] || []).join('|')}`).join('\n')).digest('hex');
 }
 function dot(left, right) { return left.reduce((sum, value, index) => sum + value * (right[index] || 0), 0); }
 function normalizeQuery(query) { return `query: ${query}`; }
-function normalizePassage(record, variants) { return `passage: Dataset: ${record.dataset}. Category: ${record.category}. Question: ${record.question}. Answer: ${record.answer}. Search aliases: ${(variants[record.id] || []).slice(0, 8).join(' | ')}`; }
+function normalizePassage(record, variants) { return `passage: Dataset: ${record.dataset}. Category: ${record.category}. Topic: ${record.topic || ''}. Intent: ${record.intent || ''}. Entities: ${record.entities || ''}. Search text: ${record.searchText || record.question}. Question: ${record.question}. Search aliases: ${(record.searchAliases || []).join(' | ')} ${(variants[record.id] || []).slice(0, 8).join(' | ')}`; }
 
 /** Local multilingual dense retrieval. If the model or its cache is unavailable,
  * callers receive a safe disabled result and the BM25/fuzzy pipeline continues. */
